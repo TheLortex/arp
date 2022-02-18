@@ -18,58 +18,58 @@
 
 module type S = sig
   type t
-  val disconnect : t -> unit Lwt.t
-  type error = private [> `Timeout ]
-  val pp_error: error Fmt.t
+  val disconnect: t -> unit
+  type Error.t += Timeout
   val pp : t Fmt.t
   val get_ips : t -> Ipaddr.V4.t list
-  val set_ips : t -> Ipaddr.V4.t list -> unit Lwt.t
-  val remove_ip : t -> Ipaddr.V4.t -> unit Lwt.t
-  val add_ip : t -> Ipaddr.V4.t -> unit Lwt.t
-  val query : t -> Ipaddr.V4.t -> (Macaddr.t, error) result Lwt.t
-  val input : t -> Cstruct.t -> unit Lwt.t
+  val set_ips : t -> Ipaddr.V4.t list -> unit
+  val remove_ip : t -> Ipaddr.V4.t -> unit
+  val add_ip : t -> Ipaddr.V4.t -> unit
+  val query : t -> Ipaddr.V4.t -> Macaddr.t Error.r
+  val input : t -> Cstruct.t -> unit
 end
-
-open Lwt.Infix
 
 let logsrc = Logs.Src.create "ARP" ~doc:"Mirage ARP handler"
 
-module Make (Ethernet : Ethernet.S) (Time : Mirage_time.S) = struct
+module Make (Ethernet : Ethernet.S) = struct
 
-  type error = [
-    | `Timeout
-  ]
-  let pp_error ppf = function
-    | `Timeout -> Fmt.pf ppf "could not determine a link-level address for the IP address given"
+  open Eio.Std
+
+  type Error.t += Timeout
+
+  let () = Error.register_printer ~id:"arp" ~title:"ARP" ~pp:(function
+    | Timeout -> Some (Fmt.(const string "could not determine a link-level address for the IP address given"))
+    | _ -> None)
 
   type t = {
-    mutable state : ((Macaddr.t, error) result Lwt.t * (Macaddr.t, error) result Lwt.u) Arp_handler.t ;
+    mutable state : (Macaddr.t Error.r Promise.t * Macaddr.t Error.r Promise.u) Arp_handler.t ;
     ethif : Ethernet.t ;
     mutable ticking : bool ;
+    clock : Eio.Time.clock ;
   }
 
   let probe_repeat_delay = Duration.of_ms 1500 (* per rfc5227, 2s >= probe_repeat_delay >= 1s *)
 
   let output t (arp, destination) =
     let size = Arp_packet.size in
-    Ethernet.write t.ethif destination `ARP ~size
-      (fun b -> Arp_packet.encode_into arp b ; size) >|= function
+    match Ethernet.write t.ethif destination `ARP ~size
+      (fun b -> Arp_packet.encode_into arp b ; size) 
+    with
     | Ok () -> ()
     | Error e ->
       Logs.warn ~src:logsrc
         (fun m -> m "error %a while outputting packet %a to %a"
-            Ethernet.pp_error e Arp_packet.pp arp Macaddr.pp destination)
+            Error.pp (Error.head e) Arp_packet.pp arp Macaddr.pp destination)
 
   let rec tick t () =
     if t.ticking then
-      Time.sleep_ns probe_repeat_delay >>= fun () ->
+      Eio.Time.sleep t.clock (Int64.to_float probe_repeat_delay /. 1_000_000_000.);
       let state, requests, timeouts = Arp_handler.tick t.state in
       t.state <- state ;
-      Lwt_list.iter_p (output t) requests >>= fun () ->
-      List.iter (fun (_, u) -> Lwt.wakeup u (Error `Timeout)) timeouts ;
+      List.map (fun r () -> output t r) requests
+      |> Fibre.all;
+      List.iter (fun (_, u) -> Promise.fulfill u (Error.v ~__POS__ Timeout)) timeouts ;
       tick t ()
-    else
-      Lwt.return_unit
 
   let pp ppf t = Arp_handler.pp ppf t.state
 
@@ -77,11 +77,12 @@ module Make (Ethernet : Ethernet.S) (Time : Mirage_time.S) = struct
     let state, out, wake = Arp_handler.input t.state frame in
     t.state <- state ;
     (match out with
-     | None -> Lwt.return_unit
-     | Some pkt -> output t pkt) >|= fun () ->
+     | None -> ()
+     | Some pkt -> output t pkt) ;
     match wake with
     | None -> ()
-    | Some (mac, (_, u)) -> Lwt.wakeup u (Ok mac)
+    | Some (mac, (_, u)) -> 
+      Promise.fulfill u (Ok mac)
 
   let get_ips t = Arp_handler.ips t.state
 
@@ -90,7 +91,7 @@ module Make (Ethernet : Ethernet.S) (Time : Mirage_time.S) = struct
     let state, out = Arp_handler.create ~logsrc ?ipaddr mac in
     t.state <- state ;
     match out with
-    | None -> Lwt.return_unit
+    | None -> ()
     | Some x -> output t x
 
   let add_ip t ipaddr =
@@ -99,10 +100,10 @@ module Make (Ethernet : Ethernet.S) (Time : Mirage_time.S) = struct
     | _ ->
       let state, out, wake = Arp_handler.alias t.state ipaddr in
       t.state <- state ;
-      output t out >|= fun () ->
+      output t out ;
       match wake with
       | None -> ()
-      | Some (_, u) -> Lwt.wakeup u (Ok (Arp_handler.mac t.state))
+      | Some (_, u) -> Promise.fulfill u (Ok (Arp_handler.mac t.state))
 
   let init_empty mac =
     let state, _ = Arp_handler.create ~logsrc mac in
@@ -112,37 +113,37 @@ module Make (Ethernet : Ethernet.S) (Time : Mirage_time.S) = struct
     | [] ->
       let mac = Arp_handler.mac t.state in
       let state = init_empty mac in
-      t.state <- state ;
-      Lwt.return_unit
+      t.state <- state
     | ipaddr::xs ->
-      create ~ipaddr t >>= fun () ->
-      Lwt_list.iter_s (add_ip t) xs
+      create ~ipaddr t ;
+      List.iter (add_ip t) xs
 
   let remove_ip t ip =
     let state = Arp_handler.remove t.state ip in
-    t.state <- state ;
-    Lwt.return_unit
+    t.state <- state 
 
   let query t ip =
     let merge = function
-      | None -> MProf.Trace.named_wait "ARP response"
+      | None -> 
+        Promise.create ~label:"ARP response" ()
       | Some a -> a
     in
     let state, res = Arp_handler.query t.state ip merge in
     t.state <- state ;
     match res with
-    | Arp_handler.RequestWait (pkt, (tr, _)) -> output t pkt >>= fun () -> tr
-    | Arp_handler.Wait (t, _) -> t
-    | Arp_handler.Mac m -> Lwt.return (Ok m)
+    | Arp_handler.RequestWait (pkt, (tr, _)) -> 
+      output t pkt;
+      Promise.await tr
+    | Arp_handler.Wait (t, _) -> Promise.await t
+    | Arp_handler.Mac m -> Ok m
 
-  let connect ethif =
+  let connect ~sw ethif clock =
     let mac = Ethernet.mac ethif in
     let state = init_empty mac in
-    let t = { ethif; state; ticking = true} in
-    Lwt.async (tick t);
-    Lwt.return t
+    let t = { ethif; state; ticking = true; clock} in
+    Fibre.fork ~sw (tick t);
+    t
 
   let disconnect t =
-    t.ticking <- false ;
-    Lwt.return_unit
+    t.ticking <- false
 end
