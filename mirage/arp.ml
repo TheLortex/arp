@@ -68,7 +68,7 @@ module Make (Ethernet : Ethernet.S) = struct
       t.state <- state ;
       List.map (fun r () -> output t r) requests
       |> Fibre.all;
-      List.iter (fun (_, u) -> Promise.fulfill u (Error.v ~__POS__ Timeout)) timeouts ;
+      List.iter (fun (_, u) -> Promise.resolve u (Error.v ~__POS__ Timeout)) timeouts ;
       tick t ()
 
   let pp ppf t = Arp_handler.pp ppf t.state
@@ -82,7 +82,7 @@ module Make (Ethernet : Ethernet.S) = struct
     match wake with
     | None -> ()
     | Some (mac, (_, u)) -> 
-      Promise.fulfill u (Ok mac)
+      Promise.resolve u (Ok mac)
 
   let get_ips t = Arp_handler.ips t.state
 
@@ -103,7 +103,7 @@ module Make (Ethernet : Ethernet.S) = struct
       output t out ;
       match wake with
       | None -> ()
-      | Some (_, u) -> Promise.fulfill u (Ok (Arp_handler.mac t.state))
+      | Some (_, u) -> Promise.resolve u (Ok (Arp_handler.mac t.state))
 
   let init_empty mac =
     let state, _ = Arp_handler.create ~logsrc mac in
