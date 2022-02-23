@@ -52,8 +52,9 @@ module Make (Ethernet : Ethernet.S) = struct
 
   let output t (arp, destination) =
     let size = Arp_packet.size in
-    match Ethernet.write t.ethif destination `ARP ~size
-      (fun b -> Arp_packet.encode_into arp b ; size) 
+    let buf = Cstruct.create_unsafe size in
+    Arp_packet.encode_into arp buf;
+    match Ethernet.writev t.ethif destination `ARP [buf]
     with
     | Ok () -> ()
     | Error e ->
