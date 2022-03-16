@@ -68,7 +68,7 @@ module Make (Ethernet : Ethernet.S) = struct
       let state, requests, timeouts = Arp_handler.tick t.state in
       t.state <- state ;
       List.map (fun r () -> output t r) requests
-      |> Fibre.all;
+      |> Fiber.all;
       List.iter (fun (_, u) -> Promise.resolve u (Error.v ~__POS__ Timeout)) timeouts ;
       tick t ()
 
@@ -142,7 +142,7 @@ module Make (Ethernet : Ethernet.S) = struct
     let mac = Ethernet.mac ethif in
     let state = init_empty mac in
     let t = { ethif; state; ticking = true; clock} in
-    Fibre.fork ~sw (tick t);
+    Fiber.fork ~sw (tick t);
     t
 
   let disconnect t =

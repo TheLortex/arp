@@ -65,5 +65,5 @@ end
 module Make (Ethernet : Ethernet.S) : sig
   include S
 
-  val connect : sw:Eio.Std.Switch.t -> Ethernet.t -> Eio.Time.clock -> t
+  val connect : sw:Eio.Switch.t -> Ethernet.t -> Eio.Time.clock -> t
 end
