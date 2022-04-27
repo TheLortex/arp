@@ -19,7 +19,6 @@
 module type S = sig
   type t
   val disconnect: t -> unit
-  type Error.t += Timeout
   val pp : t Fmt.t
   val get_ips : t -> Ipaddr.V4.t list
   val set_ips : t -> Ipaddr.V4.t list -> unit
@@ -31,15 +30,15 @@ end
 
 let logsrc = Logs.Src.create "ARP" ~doc:"Mirage ARP handler"
 
+type Error.t += Timeout
+
+let () = Error.register_printer ~id:"arp" ~title:"ARP" ~pp:(function
+  | Timeout -> Some (Fmt.(const string "could not determine a link-level address for the IP address given"))
+  | _ -> None)
+
 module Make (Ethernet : Ethernet.S) = struct
 
   open Eio.Std
-
-  type Error.t += Timeout
-
-  let () = Error.register_printer ~id:"arp" ~title:"ARP" ~pp:(function
-    | Timeout -> Some (Fmt.(const string "could not determine a link-level address for the IP address given"))
-    | _ -> None)
 
   type t = {
     mutable state : (Macaddr.t Error.r Promise.t * Macaddr.t Error.r Promise.u) Arp_handler.t ;
@@ -63,14 +62,16 @@ module Make (Ethernet : Ethernet.S) = struct
             Error.pp (Error.head e) Arp_packet.pp arp Macaddr.pp destination)
 
   let rec tick t () =
-    if t.ticking then
-      Eio.Time.sleep t.clock (Int64.to_float probe_repeat_delay /. 1_000_000_000.);
+    if t.ticking then begin
+      Eio.traceln "tick: %f" (Eio.Time.now t.clock);
+      Eio.Time.sleep t.clock (Duration.to_f probe_repeat_delay );
       let state, requests, timeouts = Arp_handler.tick t.state in
       t.state <- state ;
       List.map (fun r () -> output t r) requests
       |> Fiber.all;
       List.iter (fun (_, u) -> Promise.resolve u (Error.v ~__POS__ Timeout)) timeouts ;
       tick t ()
+    end
 
   let pp ppf t = Arp_handler.pp ppf t.state
 
@@ -131,12 +132,20 @@ module Make (Ethernet : Ethernet.S) = struct
     in
     let state, res = Arp_handler.query t.state ip merge in
     t.state <- state ;
-    match res with
-    | Arp_handler.RequestWait (pkt, (tr, _)) -> 
-      output t pkt;
-      Promise.await tr
-    | Arp_handler.Wait (t, _) -> Promise.await t
-    | Arp_handler.Mac m -> Ok m
+    Logs.warn (fun f -> f "QUERY: %a" Ipaddr.V4.pp ip);
+    let result = 
+      match res with
+      | Arp_handler.RequestWait (pkt, (tr, _)) -> 
+        output t pkt;
+        Promise.await tr
+      | Arp_handler.Wait (t, _) -> Promise.await t
+      | Arp_handler.Mac m -> 
+        Logs.warn (fun f -> f "QUERY: CACHED");
+        Ok m
+    in
+    Result.iter (fun result -> 
+      Logs.warn (fun f -> f "QUERY: %a -> %a" Ipaddr.V4.pp ip Macaddr.pp result)) result;
+    result
 
   let connect ~sw ethif clock =
     let mac = Ethernet.mac ethif in

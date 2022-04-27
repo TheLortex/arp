@@ -17,6 +17,9 @@
 
 (** {2 ARP} *)
 
+type Error.t += Timeout
+(** The type for ARP errors. *)
+
 (** Address resolution protocol, translating network addresses (e.g. IPv4)
     into link layer addresses (MAC). *)
 module type S = sig
@@ -26,9 +29,6 @@ module type S = sig
   val disconnect: t -> unit
   (** Disconnect from the ARP layer. While this might take some time to
       complete, it can never result in an error. *)
-
-  type Error.t += Timeout
-  (** The type for ARP errors. *)
 
   (** Prettyprint cache contents *)
   val pp : t Fmt.t
