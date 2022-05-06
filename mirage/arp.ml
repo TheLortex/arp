@@ -63,7 +63,6 @@ module Make (Ethernet : Ethernet.S) = struct
 
   let rec tick t () =
     if t.ticking then begin
-      Eio.traceln "tick: %f" (Eio.Time.now t.clock);
       Eio.Time.sleep t.clock (Duration.to_f probe_repeat_delay );
       let state, requests, timeouts = Arp_handler.tick t.state in
       t.state <- state ;
