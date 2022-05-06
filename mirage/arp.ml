@@ -131,20 +131,13 @@ module Make (Ethernet : Ethernet.S) = struct
     in
     let state, res = Arp_handler.query t.state ip merge in
     t.state <- state ;
-    Logs.warn (fun f -> f "QUERY: %a" Ipaddr.V4.pp ip);
-    let result = 
-      match res with
-      | Arp_handler.RequestWait (pkt, (tr, _)) -> 
-        output t pkt;
-        Promise.await tr
-      | Arp_handler.Wait (t, _) -> Promise.await t
-      | Arp_handler.Mac m -> 
-        Logs.warn (fun f -> f "QUERY: CACHED");
-        Ok m
-    in
-    Result.iter (fun result -> 
-      Logs.warn (fun f -> f "QUERY: %a -> %a" Ipaddr.V4.pp ip Macaddr.pp result)) result;
-    result
+    match res with
+    | Arp_handler.RequestWait (pkt, (tr, _)) -> 
+      output t pkt;
+      Promise.await tr
+    | Arp_handler.Wait (t, _) -> Promise.await t
+    | Arp_handler.Mac m -> 
+      Ok m
 
   let connect ~sw ethif clock =
     let mac = Ethernet.mac ethif in
