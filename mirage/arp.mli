@@ -17,7 +17,7 @@
 
 (** {2 ARP} *)
 
-type Error.t += Timeout
+exception Timeout
 (** The type for ARP errors. *)
 
 (** Address resolution protocol, translating network addresses (e.g. IPv4)
@@ -53,7 +53,7 @@ module type S = sig
   (** [query arp ip] queries the cache in [arp] for an ARP entry
       corresponding to [ip], which may result in the sender sleeping
       waiting for a response. *)
-  val query : t -> Ipaddr.V4.t -> Macaddr.t Error.r
+  val query : t -> Ipaddr.V4.t -> Macaddr.t
 
   (** [input arp frame] will handle an ARP frame. If it is a response,
       it will update its cache, otherwise will try to satisfy the
@@ -65,5 +65,5 @@ end
 module Make (Ethernet : Ethernet.S) : sig
   include S
 
-  val connect : sw:Eio.Switch.t -> Ethernet.t -> Eio.Time.clock -> t
+  val connect : sw:Eio.Switch.t -> clock:Eio.Time.clock -> Ethernet.t -> t
 end

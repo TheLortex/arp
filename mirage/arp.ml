@@ -24,24 +24,22 @@ module type S = sig
   val set_ips : t -> Ipaddr.V4.t list -> unit
   val remove_ip : t -> Ipaddr.V4.t -> unit
   val add_ip : t -> Ipaddr.V4.t -> unit
-  val query : t -> Ipaddr.V4.t -> Macaddr.t Error.r
+  val query : t -> Ipaddr.V4.t -> Macaddr.t
   val input : t -> Cstruct.t -> unit
 end
 
 let logsrc = Logs.Src.create "ARP" ~doc:"Mirage ARP handler"
 
-type Error.t += Timeout
+exception Timeout
 
-let () = Error.register_printer ~id:"arp" ~title:"ARP" ~pp:(function
-  | Timeout -> Some (Fmt.(const string "could not determine a link-level address for the IP address given"))
-  | _ -> None)
+type 'a or_exn = ('a, exn) result
 
 module Make (Ethernet : Ethernet.S) = struct
 
   open Eio.Std
 
   type t = {
-    mutable state : (Macaddr.t Error.r Promise.t * Macaddr.t Error.r Promise.u) Arp_handler.t ;
+    mutable state : (Macaddr.t or_exn Promise.t * Macaddr.t or_exn Promise.u) Arp_handler.t ;
     ethif : Ethernet.t ;
     mutable ticking : bool ;
     clock : Eio.Time.clock ;
@@ -53,13 +51,13 @@ module Make (Ethernet : Ethernet.S) = struct
     let size = Arp_packet.size in
     let buf = Cstruct.create_unsafe size in
     Arp_packet.encode_into arp buf;
-    match Ethernet.writev t.ethif destination `ARP [buf]
+    try 
+      Ethernet.writev t.ethif destination `ARP [buf]
     with
-    | Ok () -> ()
-    | Error e ->
+    | e ->
       Logs.warn ~src:logsrc
-        (fun m -> m "error %a while outputting packet %a to %a"
-            Error.pp (Error.head e) Arp_packet.pp arp Macaddr.pp destination)
+        (fun m -> m "exception %s while outputting packet %a to %a"
+            (Printexc.to_string e) Arp_packet.pp arp Macaddr.pp destination)
 
   let rec tick t () =
     if t.ticking then begin
@@ -68,7 +66,7 @@ module Make (Ethernet : Ethernet.S) = struct
       t.state <- state ;
       List.map (fun r () -> output t r) requests
       |> Fiber.all;
-      List.iter (fun (_, u) -> Promise.resolve u (Error.v ~__POS__ Timeout)) timeouts ;
+      List.iter (fun (_, u) -> Promise.resolve u (Error Timeout)) timeouts ;
       tick t ()
     end
 
@@ -133,13 +131,22 @@ module Make (Ethernet : Ethernet.S) = struct
     t.state <- state ;
     match res with
     | Arp_handler.RequestWait (pkt, (tr, _)) -> 
-      output t pkt;
-      Promise.await tr
-    | Arp_handler.Wait (t, _) -> Promise.await t
+      (output t pkt;
+      match 
+        Promise.await tr
+      with
+      | Ok v -> v
+      | Error exn -> raise exn)
+    | Arp_handler.Wait (t, _) -> 
+      (match 
+        Promise.await t
+      with
+      | Ok v -> v
+      | Error exn -> raise exn)
     | Arp_handler.Mac m -> 
-      Ok m
+      m
 
-  let connect ~sw ethif clock =
+  let connect ~sw ~clock ethif =
     let mac = Ethernet.mac ethif in
     let state = init_empty mac in
     let t = { ethif; state; ticking = true; clock} in

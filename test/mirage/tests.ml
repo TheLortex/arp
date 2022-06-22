@@ -136,7 +136,7 @@ let get_arp ~sw ~clock ?backend () =
   in
   let netif = V.connect backend in
   let ethif = E.connect netif in
-  let arp = A.connect ~sw ethif (fast_clock clock) in
+  let arp = A.connect ~sw ~clock:(fast_clock clock) ethif in
   { backend; netif; ethif; arp }
 
 (* we almost always want two stacks on the same backend *)
@@ -154,22 +154,18 @@ let three_arp ~sw ~clock () =
 
 let query_or_die arp ip expected_mac =
   match A.query arp ip with
-  | Error e when Error.head e = Arp.Timeout ->
+  | exception Arp.Timeout ->
     Log.warn (fun f -> f "Timeout querying %a. Table contents: %a"
                  Ipaddr.V4.pp ip A.pp arp);
     fail "ARP query failed when success was mandatory";
-  | Ok mac ->
+  | mac ->
     Alcotest.(check macaddr) "mismatch for expected query value" expected_mac mac
-  | Error e -> failf "ARP query failed with %a" Error.pp_trace e
 
 let query_and_no_response arp ip =
   match A.query arp ip with
-  | Error e when Error.head e = Arp.Timeout ->
+  | exception Arp.Timeout ->
     Log.warn (fun f -> f "Timeout querying %a. Table contents: %a" Ipaddr.V4.pp ip A.pp arp)
-  | Ok _ -> failf "expected nothing, found something in cache"
-  | Error e ->
-    Log.err (fun m -> m "another err");
-    failf "ARP query failed with %a" Error.pp_trace e
+  | _ -> failf "expected nothing, found something in cache"
 
 let set_and_check ~listener ~claimant ip =
   A.set_ips claimant.arp [ ip ];
@@ -192,10 +188,8 @@ let not_in_cache ~clock ~listen probe arp ip =
     fun () -> 
       Eio.Time.sleep clock 0.1;
       match A.query arp ip with
-      | Ok _ -> failf "entry in cache when it shouldn't be %a" Ipaddr.V4.pp ip
-      | Error e when Error.head e = Arp.Timeout -> ()
-      | Error e -> failf "error for %a while reading the cache: %a"
-                    Ipaddr.V4.pp ip Error.pp_trace e
+      | _ -> failf "entry in cache when it shouldn't be %a" Ipaddr.V4.pp ip
+      | exception Arp.Timeout -> ()
   ]
 
 let set_ip_sends_garp ~sw ~clock () =
@@ -298,18 +292,15 @@ let input_resolves_wait ~sw ~clock () =
       query_then_disconnect;
       (fun () ->
         Eio.Time.sleep clock 0.001;
-        match E.writev speak.ethif (V.mac listen.netif) `ARP [for_listener] with
-        | Ok x -> x
-        | Error _ -> failf "ethernet write failed")
+        E.writev speak.ethif (V.mac listen.netif) `ARP [for_listener])
     ]
   )
 
 let unreachable_times_out ~sw ~clock () =
   let speak = get_arp ~sw ~clock () in
   match A.query speak.arp first_ip with
-  | Ok _ -> failf "query claimed success when impossible for %a" Ipaddr.V4.pp first_ip
-  | Error e when Error.head e = Arp.Timeout -> ()
-  | Error e -> failf "error waiting for a timeout: %a" Error.pp_trace e
+  | _ -> failf "query claimed success when impossible for %a" Ipaddr.V4.pp first_ip
+  | exception Arp.Timeout -> ()
 
 let input_replaces_old ~sw ~clock () =
   let (listen, claimant_1, claimant_2) = three_arp ~sw ~clock () in
@@ -369,8 +360,8 @@ let query_retries ~sw ~clock () =
   in
   let ask () =
     match A.query speak.arp first_ip with
-    | Error e -> failf "Received error before >1 query: %a" Error.pp_trace e
-    | Ok _ -> failf "got result from query for %a, erroneously" Ipaddr.V4.pp first_ip
+    | exception Arp.Timeout -> failf "Received error before >1 query: %s" (Printexc.to_string Arp.Timeout)
+    | _ -> failf "got result from query for %a, erroneously" Ipaddr.V4.pp first_ip
   in
   Eio.Fiber.any [
     (fun () -> V.listen listen.netif ~header_size listener |> ignore);

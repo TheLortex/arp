@@ -107,17 +107,15 @@ type arp_stack = {
 let get_arp ~sw ~clock ?(backend = B.create ~use_async_readers:sw ()) () =
   let netif = V.connect backend in
   let ethif = E.connect netif in
-  let arp = A.connect ~sw ethif clock in
+  let arp = A.connect ~sw ~clock ethif  in
   { backend; netif; ethif; arp }
 
 let rec send ~clock ethernet gen () =
   let buffer = Cstruct.create Arp_packet.size in
   gen buffer |> ignore;
-  match E.writev ethernet Macaddr.broadcast `ARP [buffer] with
-  | Ok _ -> 
-    Eio.Fiber.yield ();
-    send ~clock ethernet gen ()
-  | Error _ -> ()
+  E.writev ethernet Macaddr.broadcast `ARP [buffer];
+  Eio.Fiber.yield ();
+  send ~clock ethernet gen ()
 
 let header_size = Ethernet.Packet.sizeof_ethernet
 
