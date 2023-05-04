@@ -51,7 +51,7 @@ module Make (Ethernet : Ethernet.S) = struct
     let size = Arp_packet.size in
     let buf = Cstruct.create_unsafe size in
     Arp_packet.encode_into arp buf;
-    try 
+    try
       Ethernet.writev t.ethif destination `ARP [buf]
     with
     | e ->
@@ -69,6 +69,8 @@ module Make (Ethernet : Ethernet.S) = struct
       List.iter (fun (_, u) -> Promise.resolve u (Error Timeout)) timeouts ;
       tick t ()
     end
+    else `Stop_daemon
+
 
   let pp ppf t = Arp_handler.pp ppf t.state
 
@@ -80,7 +82,7 @@ module Make (Ethernet : Ethernet.S) = struct
      | Some pkt -> output t pkt) ;
     match wake with
     | None -> ()
-    | Some (mac, (_, u)) -> 
+    | Some (mac, (_, u)) ->
       Promise.resolve u (Ok mac)
 
   let get_ips t = Arp_handler.ips t.state
@@ -119,38 +121,38 @@ module Make (Ethernet : Ethernet.S) = struct
 
   let remove_ip t ip =
     let state = Arp_handler.remove t.state ip in
-    t.state <- state 
+    t.state <- state
 
   let query t ip =
     let merge = function
-      | None -> 
-        Promise.create ~label:"ARP response" ()
+      | None ->
+        Promise.create ()
       | Some a -> a
     in
     let state, res = Arp_handler.query t.state ip merge in
     t.state <- state ;
     match res with
-    | Arp_handler.RequestWait (pkt, (tr, _)) -> 
+    | Arp_handler.RequestWait (pkt, (tr, _)) ->
       (output t pkt;
-      match 
+      match
         Promise.await tr
       with
       | Ok v -> v
       | Error exn -> raise exn)
-    | Arp_handler.Wait (t, _) -> 
-      (match 
+    | Arp_handler.Wait (t, _) ->
+      (match
         Promise.await t
       with
       | Ok v -> v
       | Error exn -> raise exn)
-    | Arp_handler.Mac m -> 
+    | Arp_handler.Mac m ->
       m
 
   let connect ~sw ~clock ethif =
     let mac = Ethernet.mac ethif in
     let state = init_empty mac in
     let t = { ethif; state; ticking = true; clock} in
-    Fiber.fork ~sw (tick t);
+    Fiber.fork_daemon ~sw (tick t);
     t
 
   let disconnect t =
